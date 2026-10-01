@@ -1,0 +1,6 @@
+requests
+flask
+mightstone
+numpy
+scipy
+safetensors

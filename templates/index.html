@@ -1,0 +1,123 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Commander Deckbuilder</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 880px; margin: 1.5rem auto;
+           padding: 0 1rem; background: #16181d; color: #e6e6e6; }
+    h1 { font-size: 1.35rem; margin-bottom: .2rem; }
+    .row { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: .6rem; }
+    input, select, button, textarea {
+      padding: .45rem; background: #23262e; color: #e6e6e6;
+      border: 1px solid #3a3f4b; border-radius: 4px; font-size: .9rem; }
+    button { cursor: pointer; background: #2d6cdf; border-color: #2d6cdf; }
+    button.ghost { background: #23262e; border-color: #3a3f4b; }
+    table { border-collapse: collapse; width: 100%; font-size: .88rem; }
+    th, td { text-align: left; padding: .25rem .5rem; border-bottom: 1px solid #2a2e37; }
+    .meta { color: #9aa0ac; font-size: .84rem; margin: .4rem 0; }
+    .warn { color: #ffcc66; background: #2a2620; padding: .5rem .7rem;
+            border-radius: 4px; margin: .5rem 0; font-size: .85rem; }
+    .error { color: #ff6b6b; }
+    .ok { color: #7ddc8d; }
+    textarea { width: 100%; font-family: monospace; }
+    fieldset { border: 1px solid #3a3f4b; border-radius: 6px; margin: 1.2rem 0; }
+    legend { color: #9aa0ac; font-size: .85rem; }
+  </style>
+</head>
+<body>
+  <h1>Commander Deckbuilder</h1>
+  <p class="meta">
+    {{ stats.builds }} builds · {{ stats.with_feedback }} with feedback ·
+    {{ stats.labelled_cards }} labelled cards
+    ({{ stats.positive }}+ / {{ stats.negative }}-)
+    {% if stats.labelled_cards >= 300 %}
+      <span class="ok">— enough to retrain</span>
+    {% endif %}
+  </p>
+
+  <form method="post">
+    <div class="row">
+      <input name="commander" placeholder="Commander name" required style="flex:1"
+             value="{{ request.form.get('commander','') }}">
+      <button name="action" value="themes">Load themes</button>
+    </div>
+    {% if themes or budget %}
+    <div class="row">
+      <select name="theme">
+        <option value="">— no theme —</option>
+        {% for value, suffix, count in themes %}
+          <option value="{{ suffix }}"
+            {% if request.form.get('theme') == suffix %}selected{% endif %}>
+            {{ value }} ({{ count }})</option>
+        {% endfor %}
+      </select>
+      <input name="max_price" placeholder="Max $/card" style="width:110px"
+             value="{{ request.form.get('max_price','') }}">
+      <input name="taste_weight" placeholder="Taste 0-1" style="width:110px"
+             value="{{ request.form.get('taste_weight','') }}"
+             {% if not taste_ready %}disabled title="Train the readout first"{% endif %}>
+    </div>
+    <div class="row">
+      <input name="queries" style="flex:1"
+             placeholder="Extra Scryfall queries, comma separated (otag:wheel, kw:landfall)"
+             value="{{ request.form.get('queries','') }}">
+      <button name="action" value="build">Build deck</button>
+    </div>
+    {% endif %}
+  </form>
+
+  {% if not taste_ready %}
+    <p class="meta">Fly readout not trained — statistical scoring only.</p>
+  {% endif %}
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+  {% if pending %}
+    <p class="meta">Awaiting feedback:
+      {% for b in pending %}{{ b.commander }} ({{ b.build_id }}){% if not loop.last %}, {% endif %}{% endfor %}
+    </p>
+  {% endif %}
+
+  {% if deck %}
+    {% for w in deck.warnings %}<div class="warn">{{ w }}</div>{% endfor %}
+
+    <p class="meta">
+      <strong>{{ deck.commander }}</strong> · theme: {{ deck.theme or 'none' }} ·
+      {{ deck.total_cards }} cards<br>
+      roles: {{ deck.roles }}<br>
+      curve: {{ deck.curve }}
+      {% for line in deck.refine_log %}<br>refine: {{ line }}{% endfor %}
+    </p>
+
+    <fieldset>
+      <legend>Edit &amp; teach — untick what you'd cut, then submit</legend>
+      <form method="post" action="/feedback">
+        <input type="hidden" name="build_id" value="{{ deck.build_id }}">
+        <table>
+          <tr><th>Keep</th><th>Card</th><th>Role</th><th>CMC</th><th>$</th><th>Score</th></tr>
+          {% for c in deck.cards %}
+            <tr>
+              <td><input type="checkbox" name="keep" value="{{ c.name }}" checked></td>
+              <td>{{ c.name }}</td><td>{{ c.role }}</td><td>{{ c.cmc }}</td>
+              <td>{{ c.price }}</td><td>{{ c.score }}</td>
+            </tr>
+          {% endfor %}
+        </table>
+        <div class="row" style="margin-top:.8rem">
+          <textarea name="added" rows="3" style="flex:1"
+            placeholder="Cards you'd add instead — one per line (strongest signal)"></textarea>
+        </div>
+        <div class="row">
+          <input name="note" style="flex:1" placeholder="Optional note to yourself">
+          <button type="submit">Save feedback</button>
+        </div>
+      </form>
+    </fieldset>
+
+    <p class="meta">Lands: {{ deck.lands }}</p>
+    <h3>Import text</h3>
+    <textarea readonly rows="10">{{ decklist }}</textarea>
+  {% endif %}
+</body>
+</html>
