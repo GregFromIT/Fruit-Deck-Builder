@@ -22,10 +22,27 @@ is lost and you can always re-derive labels differently later.
 
 import json
 import os
+import re
 import time
 import uuid
 
 LOG = os.environ.get("MTG_FEEDBACK_LOG", "feedback.jsonl")
+
+# The builder never proposes lands, so basics in a pasted list would all
+# log as "added" — the strongest positive label — for cards nobody chose.
+BASICS = {"plains", "island", "swamp", "mountain", "forest", "wastes"}
+
+
+def parse_card_line(line):
+    """'1x Sol Ring (CMR) 123' -> 'Sol Ring'. '' for blanks and comments."""
+    line = line.strip()
+    if not line or line.startswith(("#", "//")):
+        return ""
+    return re.sub(r"^\d+x?\s+", "", line).split(" (")[0].strip()
+
+
+def _is_basic(name):
+    return name.lower().removeprefix("snow-covered ") in BASICS
 
 
 def _append(record):
@@ -45,7 +62,9 @@ def log_build(spec, deck, pool_names):
         "type": "build",
         "build_id": build_id,
         "ts": time.time(),
-        "commander": spec.commander,
+        # Scryfall's canonical name, not whatever was typed — log_feedback
+        # matches pasted commander lines against it.
+        "commander": deck.get("commander", spec.commander),
         "theme": spec.theme,
         "taste_weight": spec.taste_weight,
         "proposed": [c["name"] for c in deck["cards"]],
@@ -57,17 +76,21 @@ def log_build(spec, deck, pool_names):
 def log_feedback(build_id, final_cards, note=None):
     """Record your edited list against what was proposed.
 
-    final_cards: the decklist you actually settled on (names).
+    final_cards: the decklist you actually settled on — names or raw export
+    lines ("1 Sol Ring"). The commander and basic lands are dropped.
     Derives kept/cut/added by diffing against the build record.
+    Returns the logged record.
     """
     build = find_build(build_id)
     if not build:
         raise ValueError(f"No build {build_id} in {LOG}")
 
     proposed = set(build["proposed"])
-    final = set(final_cards)
+    commander = build["commander"].lower()
+    final = {n for n in map(parse_card_line, final_cards)
+             if n and n.lower() != commander and not _is_basic(n)}
 
-    _append({
+    record = {
         "type": "feedback",
         "build_id": build_id,
         "ts": time.time(),
@@ -76,7 +99,9 @@ def log_feedback(build_id, final_cards, note=None):
         "cut": sorted(proposed - final),
         "added": sorted(final - proposed),
         "note": note,
-    })
+    }
+    _append(record)
+    return record
 
 
 def _read():

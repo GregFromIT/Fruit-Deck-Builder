@@ -18,6 +18,7 @@ import os
 import numpy as np
 
 import edhrec_client as edhrec
+import fallbacks
 import scryfall
 from fetch_training_decks import load_my_decks
 from fly_reservoir import FlyReservoir, Readout, card_features, load_connectome
@@ -28,15 +29,46 @@ ALPHA_SWEEP = [1.0, 10.0, 100.0, 1000.0, 10000.0]
 OUT = "readout_W.npy"
 
 
-def enrich(names):
+_CONTEXT = {}
+
+
+def commander_context(commander):
+    """EDHREC stats and roles for one commander, the same sources
+    deckbuilder.build_pool uses. Training MUST see the same feature values
+    the builder will feed taste.py, or the readout learns from zeros."""
+    if commander in _CONTEXT:
+        return _CONTEXT[commander]
+    warnings = []
+    try:
+        edh = {c["name"]: c for c in edhrec.commander_pool(commander)}
+    except Exception as e:
+        edh = {}
+        warnings.append(f"EDHREC pool unavailable ({e})")
+    try:
+        cmd = scryfall.named(commander)
+        colors = "".join(cmd.get("color_identity", [])) or "C"
+        roles = fallbacks.role_map_with_fallback(
+            f"f:commander id<={colors} -t:land", warnings)
+    except Exception as e:
+        roles = {}
+        warnings.append(f"role map unavailable ({e})")
+    for w in warnings:
+        print(f"  ({commander}: {w})")
+    _CONTEXT[commander] = (edh, roles)
+    return edh, roles
+
+
+def enrich(names, commander):
+    edh, roles = commander_context(commander)
     details = scryfall.collection(list(names))
-    roles = {}
     out = []
     for name in names:
         d = details.get(name)
         if d:
+            e = edh.get(name, {})
             out.append({**d, "role": roles.get(name, "other"),
-                        "synergy": 0.0, "inclusion_pct": 0.0})
+                        "synergy": e.get("synergy", 0.0),
+                        "inclusion_pct": e.get("inclusion_pct", 0.0)})
     return out
 
 
@@ -49,24 +81,27 @@ def feedback_dataset(reservoir):
     import feedback
     pairs = feedback.training_pairs()
     if not pairs:
-        return [], []
-    by_name = {}
-    for name, label, _ in pairs:
-        by_name.setdefault(name, []).append(label)
-    # A card kept in one deck and cut from another averages out rather than
-    # contradicting itself.
-    states, labels = [], []
-    for card in enrich(list(by_name)):
-        vals = by_name[card["name"]]
-        states.append(reservoir.state(card_features(card)))
-        labels.append(sum(vals) / len(vals))
+        return [], [], []
+    # Features depend on the commander (synergy, role scope), so average per
+    # (commander, card): kept in one build and cut from another averages out
+    # rather than contradicting itself.
+    by_commander = {}
+    for name, label, commander in pairs:
+        by_commander.setdefault(commander, {}).setdefault(name, []).append(label)
+    states, labels, groups = [], [], []
+    for commander, by_name in by_commander.items():
+        for card in enrich(list(by_name), commander):
+            vals = by_name[card["name"]]
+            states.append(reservoir.state(card_features(card)))
+            labels.append(sum(vals) / len(vals))
+            groups.append(commander.lower())
     print(f"feedback: {len(states)} labelled cards from your builds")
-    return states, labels
+    return states, labels, groups
 
 
 def build_dataset(reservoir):
     decks = load_my_decks()
-    states, labels = feedback_dataset(reservoir)
+    states, labels, groups = feedback_dataset(reservoir)
     seen = 0
 
     if not decks and not states:
@@ -89,24 +124,43 @@ def build_dataset(reservoir):
         print(f"{commander}: {len(kept)} kept / {len(rejected)} rejected")
         seen += 1
 
-        for card in enrich(kept):
-            states.append(reservoir.state(card_features(card))); labels.append(1.0)
-        for card in enrich(rejected):
-            states.append(reservoir.state(card_features(card))); labels.append(0.0)
+        for label, names in ((1.0, kept), (0.0, rejected)):
+            for card in enrich(names, commander):
+                states.append(reservoir.state(card_features(card)))
+                labels.append(label)
+                groups.append(commander.lower())
 
     if seen < 3 and len(labels) < 300:
         print("\nWARNING: thin training set. Expect the holdout correlation "
               "to be noise. Build decks and give feedback — that accumulates "
               "labels faster than exporting old decks.")
-    return np.array(states), np.array(labels)
+    return np.array(states), np.array(labels), np.array(groups)
 
 
-def holdout(X, y, alpha, frac=0.2, seed=0):
-    """Train/test split. Near-zero test correlation means it memorised."""
+def split_by_group(groups, frac=0.2, seed=0):
+    """Hold out whole commanders, so the score measures "does it generalise
+    to a new deck" rather than "has it seen this card in another deck".
+    Falls back to a row split when there's only one commander."""
     rng = np.random.default_rng(seed)
-    idx = rng.permutation(len(y))
-    cut = int(len(y) * (1 - frac))
-    tr, te = idx[:cut], idx[cut:]
+    uniq = rng.permutation(np.unique(groups))
+    if len(uniq) < 2:
+        print("  (only one commander — row split; correlation will flatter)")
+        idx = rng.permutation(len(groups))
+        cut = int(len(groups) * (1 - frac))
+        return idx[:cut], idx[cut:]
+    test, n = set(), 0
+    for g in uniq[:-1]:                 # always leave one group for training
+        if n >= frac * len(groups):
+            break
+        test.add(g)
+        n += int((groups == g).sum())
+    mask = np.isin(groups, list(test))
+    return np.where(~mask)[0], np.where(mask)[0]
+
+
+def holdout(X, y, groups, alpha, frac=0.2, seed=0):
+    """Train/test split. Near-zero test correlation means it memorised."""
+    tr, te = split_by_group(groups, frac, seed)
     r = Readout(alpha=alpha)
     r.fit(X[tr], y[tr])
     preds = np.array([r.predict(s) for s in X[te]])
@@ -122,18 +176,19 @@ if __name__ == "__main__":
     print(f"Loading connectome ({NEURONS} neurons)...")
     reservoir = FlyReservoir(load_connectome(CONNECTOME, max_neurons=NEURONS))
 
-    X, y = build_dataset(reservoir)
-    print(f"\n{len(y)} samples, {X.shape[1]} state dims, {int(y.sum())} positive")
+    X, y, groups = build_dataset(reservoir)
+    print(f"\n{len(y)} samples, {X.shape[1]} state dims, {int(y.sum())} positive, "
+          f"{len(np.unique(groups))} commanders")
 
     best, best_corr = None, -2
     for alpha in ALPHA_SWEEP:
-        r, corr = holdout(X, y, alpha)
+        r, corr = holdout(X, y, groups, alpha)
         flag = "  <-- best" if corr > best_corr else ""
         if corr > best_corr:
             best, best_corr = r, corr
         print(f"  alpha={alpha:>9}  holdout corr={corr:+.3f}{flag}")
 
-    np.save(OUT, best.W)
+    best.save(OUT)
     print(f"\nSaved {OUT}  (corr={best_corr:+.3f})")
     if best_corr < 0.15:
         print("\nThat correlation is basically noise. In order of likelihood:")

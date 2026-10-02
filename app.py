@@ -60,8 +60,7 @@ def submit_feedback():
     the 'added' box counts as a manual add (the strongest positive signal)."""
     build_id = request.form["build_id"]
     kept = request.form.getlist("keep")
-    added = [n.strip() for n in
-             request.form.get("added", "").splitlines() if n.strip()]
+    added = request.form.get("added", "").splitlines()  # parsed by log_feedback
     note = request.form.get("note", "").strip() or None
     try:
         feedback.log_feedback(build_id, kept + added, note=note)

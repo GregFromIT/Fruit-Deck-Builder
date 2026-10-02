@@ -59,11 +59,10 @@ def record_feedback(build_id):
             break
         if not line:
             break
-        final.append(line.split(" (")[0].lstrip("0123456789x ").strip())
-    feedback.log_feedback(build_id, final)
-    kept = len(set(b["proposed"]) & set(final))
-    print(f"\nlogged: {kept} kept, {len(b['proposed']) - kept} cut, "
-          f"{len(set(final) - set(b['proposed']))} added")
+        final.append(line)
+    r = feedback.log_feedback(build_id, final)
+    print(f"\nlogged: {len(r['kept'])} kept, {len(r['cut'])} cut, "
+          f"{len(r['added'])} added  (commander and basics ignored)")
 
 
 def interactive():

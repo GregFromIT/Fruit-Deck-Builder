@@ -87,18 +87,38 @@ class Readout:
     """Ridge regression. This is the only trained component."""
 
     def __init__(self, alpha=1.0):
-        self.alpha, self.W = alpha, None
+        self.alpha, self.W, self.b = alpha, None, 0.0
 
     def fit(self, states, labels):
         X = np.asarray(states, dtype=np.float32)
         y = np.asarray(labels, dtype=np.float32)
-        A = X.T @ X + self.alpha * np.eye(X.shape[1], dtype=np.float32)
-        self.W = np.linalg.solve(A, X.T @ y)
+        # Centre both sides so the intercept is fitted, not penalised. Without
+        # it the weights have to fake the label mean (~0.7) through tanh states.
+        x_mean, y_mean = X.mean(axis=0), float(y.mean())
+        Xc, yc = X - x_mean, y - y_mean
+        A = Xc.T @ Xc + self.alpha * np.eye(X.shape[1], dtype=np.float32)
+        self.W = np.linalg.solve(A, Xc.T @ yc)
+        self.b = y_mean - float(x_mean @ self.W)
 
     def predict(self, state):
         if self.W is None:
             raise RuntimeError("Readout not trained — call fit() first.")
-        return float(state @ self.W)
+        return float(state @ self.W) + self.b
+
+    def save(self, path):
+        """Weights with the intercept appended as the last element."""
+        np.save(path, np.append(self.W, self.b))
+
+    def load(self, path, n_dims):
+        arr = np.load(path)
+        if arr.shape[0] == n_dims:      # pre-intercept file: weights only
+            self.W, self.b = arr, 0.0
+        elif arr.shape[0] == n_dims + 1:
+            self.W, self.b = arr[:-1], float(arr[-1])
+        else:
+            raise ValueError(f"{path} has {arr.shape[0]} values, expected "
+                             f"{n_dims} or {n_dims + 1} — NEURONS mismatch?")
+        return self
 
 
 def build_training_set(reservoir, kept_cards, rejected_cards):

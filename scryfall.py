@@ -8,6 +8,7 @@ how we classify a card's ROLE without depending on EDHREC panel headers, so
 cards found by our own queries get a role too.
 """
 
+import hashlib
 import time
 
 import requests
@@ -63,7 +64,10 @@ def collection(names):
     """Batch card lookup, 75 per request.
     https://scryfall.com/docs/api/cards/collection"""
     names = list(names)
-    key = f"collection:{hash(tuple(sorted(names)))}"
+    # Not hash(): str hashing is salted per process, so the key would change
+    # every run and the cache would never hit.
+    digest = hashlib.sha256("\n".join(sorted(names)).encode()).hexdigest()
+    key = f"collection:{digest}"
 
     def fetch():
         out = {}

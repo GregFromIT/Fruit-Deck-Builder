@@ -3,8 +3,6 @@ so the builder works with or without the fly stage."""
 
 import os
 
-import numpy as np
-
 from fly_reservoir import FlyReservoir, Readout, card_features, load_connectome
 
 CONNECTOME = os.environ.get("CONNECTOME", "malecns.safetensors")
@@ -17,8 +15,7 @@ def load_taste():
     if not (os.path.exists(WEIGHTS) and os.path.exists(CONNECTOME)):
         return None
     reservoir = FlyReservoir(load_connectome(CONNECTOME, max_neurons=NEURONS))
-    readout = Readout()
-    readout.W = np.load(WEIGHTS)
+    readout = Readout().load(WEIGHTS, n_dims=NEURONS)
 
     def score(pool):
         raw = {c["name"]: readout.predict(reservoir.state(card_features(c)))
